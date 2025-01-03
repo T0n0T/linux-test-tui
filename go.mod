@@ -10,8 +10,11 @@ require (
 	go.bug.st/serial v1.6.2
 )
 
+require github.com/charmbracelet/harmonica v0.2.0 // indirect
+
 require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
+	github.com/charmbracelet/bubbles v0.20.0
 	github.com/charmbracelet/x/ansi v0.6.0 // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/creack/goselect v0.1.2 // indirect

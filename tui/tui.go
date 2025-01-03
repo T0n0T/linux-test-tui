@@ -4,7 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"go.bug.st/serial"
@@ -12,10 +16,11 @@ import (
 
 var (
 	mainStyle = lipgloss.NewStyle().
-		Margin(1, 2).
-		Padding(1, 2).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62"))
+			Margin(1, 2).
+			Padding(1, 2).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62"))
+	spinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("63"))
 )
 
 type SerialModel struct {
@@ -30,6 +35,9 @@ type SerialModel struct {
 	packetsErr  int
 	isQuitting  bool
 	maxPackets  int
+	spinner     spinner.Model
+	progress    progress.Model
+	statsTable  table.Model
 }
 
 type serialTestMsg struct{}
@@ -50,16 +58,53 @@ func NewSerialModel(port string, baudRate int, count int) (*SerialModel, error) 
 		return &SerialModel{}, fmt.Errorf("failed to open serial port: %w", err)
 	}
 
+	s := spinner.New()
+	s.Spinner = spinner.Monkey
+	s.Style = spinnerStyle
+
+	// 初始化进度条
+	prog := progress.New(
+		progress.WithDefaultGradient(),
+		progress.WithWidth(40),
+	)
+
+	// 初始化表格
+	columns := []table.Column{
+		{Title: "Metric", Width: 20},
+		{Title: "Value", Width: 20},
+	}
+
+	rows := []table.Row{
+		{"Bytes Sent", "0"},
+		{"Bytes Received", "0"},
+		{"Packets Sent", "0"},
+		{"Packets Received", "0"},
+		{"Packet Loss", "0%"},
+	}
+
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(7),
+	)
+
 	return &SerialModel{
 		port:       port,
 		baudRate:   baudRate,
 		portConn:   portConn,
 		maxPackets: count,
+		spinner:    s,
+		progress:   prog,
+		statsTable: t,
 	}, nil
 }
 
 func (m *SerialModel) Init() tea.Cmd {
-	return m.serialTest()
+	return tea.Batch(
+		m.spinner.Tick,
+		m.serialTest(),
+	)
 }
 
 func (m *SerialModel) serialTest() tea.Cmd {
@@ -122,10 +167,15 @@ func (m *SerialModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case serialTestResult:
 		return m, tea.Quit
 
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+
 	case error:
-		// if !m.isQuitting {
-		// 	log.Printf("Serial error: %v", msg)
-		// }
+		if !m.isQuitting {
+			log.Printf("Serial error: %v", msg)
+		}
 		return m, nil
 	default:
 		return m, nil
@@ -134,23 +184,35 @@ func (m *SerialModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *SerialModel) View() string {
-	title := fmt.Sprintf("Serial Loopback Test - %s @ %d baud", m.port, m.baudRate)
+	title := m.spinner.View() + fmt.Sprintf(" Serial Loopback Test - %s @ %d baud", m.port, m.baudRate)
 
-	stats := fmt.Sprintf("\nStatistics:\n"+
-		"Bytes Sent: %d\n"+
-		"Bytes Received: %d\n"+
-		"Packets Sent: %d\n"+
-		"Packets Received: %d\n",
-		m.bytesSent, m.bytesRecv, m.packetsSent, m.packetsRecv)
-
-	if m.packetsSent > 0 {
-		lossRate := float64(m.packetsSent-m.packetsRecv) / float64(m.packetsSent) * 100
-		stats += fmt.Sprintf("Packet Loss: %.2f%%\n", lossRate)
+	// 计算进度
+	progressPercent := float64(m.packetsSent) / float64(m.maxPackets)
+	if progressPercent > 1.0 {
+		progressPercent = 1.0
 	}
+
+	// 更新表格数据
+	lossRate := 0.0
+	if m.packetsSent > 0 {
+		lossRate = float64(m.packetsSent-m.packetsRecv) / float64(m.packetsSent) * 100
+	}
+
+	m.statsTable.SetRows([]table.Row{
+		{"Bytes Sent", fmt.Sprintf("%d", m.bytesSent)},
+		{"Bytes Received", fmt.Sprintf("%d", m.bytesRecv)},
+		{"Packets Sent", fmt.Sprintf("%d", m.packetsSent)},
+		{"Packets Received", fmt.Sprintf("%d", m.packetsRecv)},
+		{"Packet Loss", fmt.Sprintf("%.2f%%", lossRate)},
+	})
+
+	// 构建视图
+	progressView := fmt.Sprintf("\n\n %s \n", m.progress.ViewAs(progressPercent))
+	statsView := fmt.Sprintf("\n%s\n", m.statsTable.View())
 
 	if m.isQuitting {
-		stats += "\n"
+		statsView += "\n"
 	}
 
-	return mainStyle.Render(title + stats)
+	return mainStyle.Render(title + progressView + statsView)
 }
