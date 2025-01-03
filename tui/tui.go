@@ -1,132 +1,140 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"log"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"go.bug.st/serial"
 )
 
+var (
+	mainStyle = lipgloss.NewStyle().
+		Margin(1, 2).
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62"))
+)
+
 type SerialModel struct {
 	port        string
 	baudRate    int
-	sentData    []string
-	recvData    []string
 	portConn    serial.Port
 	bytesSent   int
 	bytesRecv   int
 	packetsSent int
 	packetsRecv int
+	packetsLost int
+	packetsErr  int
+	isQuitting  bool
+	maxPackets  int
 }
 
-func NewSerialModel(port string, baudRate int) (SerialModel, error) {
+type serialTestMsg struct{}
+type serialTestResult struct{}
+
+func calculateHash(data string) string {
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
+}
+
+func NewSerialModel(port string, baudRate int, count int) (*SerialModel, error) {
 	mode := &serial.Mode{
 		BaudRate: baudRate,
 	}
 
 	portConn, err := serial.Open(port, mode)
 	if err != nil {
-		return SerialModel{}, fmt.Errorf("failed to open serial port: %w", err)
+		return &SerialModel{}, fmt.Errorf("failed to open serial port: %w", err)
 	}
 
-	return SerialModel{
-		port:     port,
-		baudRate: baudRate,
-		portConn: portConn,
+	return &SerialModel{
+		port:       port,
+		baudRate:   baudRate,
+		portConn:   portConn,
+		maxPackets: count,
 	}, nil
 }
 
-func (m SerialModel) Init() tea.Cmd {
-	return tea.Batch(
-		m.listenForSerialData(),
-		m.sendTestData(),
-	)
+func (m *SerialModel) Init() tea.Cmd {
+	return m.serialTest()
 }
 
-func (m SerialModel) listenForSerialData() tea.Cmd {
+func (m *SerialModel) serialTest() tea.Cmd {
 	return func() tea.Msg {
-		buf := make([]byte, 128)
-		for {
-			n, err := m.portConn.Read(buf)
-			if err != nil {
-				return err
-			}
-			if n > 0 {
-				return serialDataReceived{
-					data:    string(buf[:n]),
-					bytes:   n,
-					packets: 1,
-				}
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-}
-
-func (m SerialModel) sendTestData() tea.Cmd {
-	return func() tea.Msg {
-		testData := "Test message\n"
-		time.Sleep(100 * time.Millisecond) // 增加发送间隔
+		// 生成测试数据
+		testData := fmt.Sprintf("Test packet %d", m.packetsSent+1)
+		// 发送数据
 		n, err := m.portConn.Write([]byte(testData))
 		if err != nil {
-			return err
+			return fmt.Errorf("write error: %w", err)
 		}
-		return serialDataSent{
-			data:    testData,
-			bytes:   n,
-			packets: 1,
+		m.bytesSent += n
+		m.packetsSent++
+		sentHash := calculateHash(testData)
+
+		// 接收数据
+		buf := make([]byte, 256)
+		n, err = m.portConn.Read(buf)
+		if err != nil {
+			return fmt.Errorf("read error: %w", err)
 		}
+		m.bytesRecv += n
+		m.packetsRecv++
+		recvData := string(buf[:n])
+		recvHash := calculateHash(recvData)
+
+		if sentHash != recvHash {
+			m.packetsErr++
+		}
+		if m.packetsSent > m.packetsRecv {
+			m.packetsLost = m.packetsSent - m.packetsRecv
+		}
+
+		// 检查是否完成测试
+		if m.packetsSent >= m.maxPackets {
+			m.isQuitting = true
+			return serialTestResult{}
+		}
+
+		// 继续发送下一个数据包
+		return serialTestMsg{}
 	}
 }
 
-func (m SerialModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *SerialModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			m.portConn.Close()
-			fmt.Printf("\nTest Summary:\n"+
-				"Bytes Sent: %d\n"+
-				"Bytes Received: %d\n"+
-				"Packets Sent: %d\n"+
-				"Packets Received: %d\n",
-				m.bytesSent, m.bytesRecv, m.packetsSent, m.packetsRecv)
-			if m.packetsSent > 0 {
-				lossRate := float64(m.packetsSent-m.packetsRecv) / float64(m.packetsSent) * 100
-				fmt.Printf("Packet Loss: %.2f%%\n", lossRate)
+			m.isQuitting = true
+			if m.portConn != nil {
+				// 忽略关闭错误
+				_ = m.portConn.Close()
 			}
 			return m, tea.Quit
 		}
+	case serialTestMsg:
+		return m, m.serialTest()
 
-	case serialDataSent:
-		m.sentData = append(m.sentData, msg.data)
-		m.bytesSent += msg.bytes
-		m.packetsSent += msg.packets
-		return m, m.sendTestData()
-
-	case serialDataReceived:
-		m.recvData = append(m.recvData, msg.data)
-		m.bytesRecv += msg.bytes
-		m.packetsRecv += msg.packets
-		return m, m.listenForSerialData()
+	case serialTestResult:
+		return m, tea.Quit
 
 	case error:
-		log.Printf("Serial error: %v", msg)
+		// if !m.isQuitting {
+		// 	log.Printf("Serial error: %v", msg)
+		// }
+		return m, nil
+	default:
 		return m, nil
 	}
 	return m, nil
 }
 
-func (m SerialModel) View() string {
+func (m *SerialModel) View() string {
 	title := fmt.Sprintf("Serial Loopback Test - %s @ %d baud", m.port, m.baudRate)
-
-	sent := "Sent Data:\n"
-	for _, data := range m.sentData {
-		sent += fmt.Sprintf("> %s", data)
-	}
 
 	stats := fmt.Sprintf("\nStatistics:\n"+
 		"Bytes Sent: %d\n"+
@@ -140,21 +148,9 @@ func (m SerialModel) View() string {
 		stats += fmt.Sprintf("Packet Loss: %.2f%%\n", lossRate)
 	}
 
-	style := lipgloss.NewStyle().
-		BorderStyle(lipgloss.RoundedBorder()).
-		Padding(1, 2)
+	if m.isQuitting {
+		stats += "\n"
+	}
 
-	return style.Render(title + stats)
-}
-
-type serialDataSent struct {
-	data    string
-	bytes   int
-	packets int
-}
-
-type serialDataReceived struct {
-	data    string
-	bytes   int
-	packets int
+	return mainStyle.Render(title + stats)
 }
