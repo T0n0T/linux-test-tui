@@ -88,6 +88,20 @@ func NewSerialModel(port string, baudRate int, count int) (*SerialModel, error) 
 		table.WithFocused(true),
 		table.WithHeight(7),
 	)
+	// 设置默认焦点行为Packet Loss行（第4行）
+	t.SetCursor(4)
+
+	ts := table.DefaultStyles()
+	ts.Header = ts.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		BorderBottom(true).
+		Bold(false)
+	ts.Selected = ts.Selected.
+		Foreground(lipgloss.Color("229")).
+		Background(lipgloss.Color("57")).
+		Bold(false)
+	t.SetStyles(ts)
 
 	return &SerialModel{
 		port:       port,
